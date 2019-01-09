@@ -376,9 +376,15 @@ nk_rp_pack_rects(struct nk_rp_context *context, struct nk_rp_rect *rects, int nu
  *
  * ===============================================================
  */
-/* stb_truetype.h - v1.07 - public domain */
+/* stb_truetype.h - v1.19 - public domain */
 #define NK_TT_MAX_OVERSAMPLE   8
 #define NK_TT__OVER_MASK  (NK_TT_MAX_OVERSAMPLE-1)
+
+struct nk_tt__buf {
+   unsigned char *data;
+   int cursor;
+   int size;
+};
 
 struct nk_tt_bakedchar {
     unsigned short x0,y0,x1,y1;
@@ -386,7 +392,7 @@ struct nk_tt_bakedchar {
     float xoff,yoff,xadvance;
 };
 
-struct nk_tt_aligned_quad{
+struct nk_tt_aligned_quad {
     float x0,y0,s0,t0; /* top-left */
     float x1,y1,s1,t1; /* bottom-right */
 };
@@ -425,19 +431,26 @@ struct nk_tt_fontinfo {
     const unsigned char* data; /* pointer to .ttf file */
     int fontstart;/* offset of start of font */
     int numGlyphs;/* number of glyphs, needed for range checking */
-    int loca,head,glyf,hhea,hmtx,kern; /* table locations as offset from start of .ttf */
+    int loca,head,glyf,hhea,hmtx,kern,gpos; /* table locations as offset from start of .ttf */
     int index_map; /* a cmap mapping for our chosen character encoding */
     int indexToLocFormat; /* format needed to map from glyph index to glyph */
+    struct nk_tt__buf cff; /* cff font data */
+    struct nk_tt__buf charstrings; /* the charstring index */
+    struct nk_tt__buf gsubrs; /* global charstring subroutines index */
+    struct nk_tt__buf subrs; /* private charstring subroutines index */
+    struct nk_tt__buf fontdicts; /* array of font dicts */
+    struct nk_tt__buf fdselect; /* map from glyph to fontdict */
 };
 
 enum {
   NK_TT_vmove=1,
   NK_TT_vline,
-  NK_TT_vcurve
+  NK_TT_vcurve,
+  NK_TT_vcubic
 };
 
 struct nk_tt_vertex {
-    short x,y,cx,cy;
+    short x,y,cx,cy,cx1,cy1;
     unsigned char type,padding;
 };
 
@@ -526,6 +539,149 @@ enum { /* languageID for NK_TT_PLATFORM_ID_MAC */
    NK_TT_MAC_LANG_ITALIAN      =3 ,   NK_TT_MAC_LANG_CHINESE_TRAD =19
 };
 
+NK_INTERN NK_UINT8
+nk_tt__buf_get8(struct nk_tt__buf *b)
+{
+    if (b->cursor >= b->size)
+        return 0;
+    return b->data[b->cursor++];
+}
+NK_INTERN NK_UINT8
+nk_tt__buf_peek8(struct nk_tt__buf *b)
+{
+    if (b->cursor >= b->size)
+        return 0;
+    return b->data[b->cursor];
+}
+NK_INTERN void
+nk_tt__buf_seek(struct nk_tt__buf *b, int o)
+{
+    NK_ASSERT(!(o > b->size || o < 0));
+    b->cursor = (o > b->size || o < 0) ? b->size : o;
+}
+NK_INTERN void
+nk_tt__buf_skip(struct nk_tt__buf *b, int o)
+{
+    nk_tt__buf_seek(b, b->cursor + o);
+}
+NK_INTERN NK_UINT32
+nk_tt__buf_get(struct nk_tt__buf *b, int n)
+{
+    NK_UINT32 v = 0;
+    int i;
+    NK_ASSERT(n >= 1 && n <= 4);
+    for (i = 0; i < n; i++)
+        v = (v << 8) | nk_tt__buf_get8(b);
+    return v;
+}
+NK_INTERN struct nk_tt__buf
+nk_tt__new_buf(const void *p, size_t size)
+{
+    struct nk_tt__buf r;
+    NK_ASSERT(size < 0x40000000);
+    r.data = (NK_UINT8*) p;
+    r.size = (int) size;
+    r.cursor = 0;
+    return r;
+}
+
+#define nk_tt__buf_get16(b)  nk_tt__buf_get((b), 2)
+#define nk_tt__buf_get32(b)  nk_tt__buf_get((b), 4)
+
+NK_INTERN struct nk_tt__buf
+nk_tt__buf_range(const struct nk_tt__buf *b, int o, int s)
+{
+    struct nk_tt__buf r = nk_tt__new_buf(NULL, 0);
+    if (o < 0 || s < 0 || o > b->size || s > b->size - o) return r;
+    r.data = b->data + o;
+    r.size = s;
+    return r;
+}
+NK_INTERN struct nk_tt__buf
+nk_tt__cff_get_index(struct nk_tt__buf *b)
+{
+    int count, start, offsize;
+    start = b->cursor;
+    count = nk_tt__buf_get16(b);
+    if (count) {
+        offsize = nk_tt__buf_get8(b);
+        NK_ASSERT(offsize >= 1 && offsize <= 4);
+        nk_tt__buf_skip(b, offsize * count);
+        nk_tt__buf_skip(b, nk_tt__buf_get(b, offsize) - 1);
+    }
+    return nk_tt__buf_range(b, start, b->cursor - start);
+}
+NK_INTERN NK_UINT32
+nk_tt__cff_int(struct nk_tt__buf *b)
+{
+    int b0 = nk_tt__buf_get8(b);
+    if (b0 >= 32 && b0 <= 246)       return b0 - 139;
+    else if (b0 >= 247 && b0 <= 250) return (b0 - 247)*256 + nk_tt__buf_get8(b) + 108;
+    else if (b0 >= 251 && b0 <= 254) return -(b0 - 251)*256 - nk_tt__buf_get8(b) - 108;
+    else if (b0 == 28)               return nk_tt__buf_get16(b);
+    else if (b0 == 29)               return nk_tt__buf_get32(b);
+    NK_ASSERT(0);
+    return 0;
+}
+NK_INTERN void
+nk_tt__cff_skip_operand(struct nk_tt__buf *b) {
+    int v, b0 = nk_tt__buf_peek8(b);
+    NK_ASSERT(b0 >= 28);
+    if (b0 == 30) {
+        nk_tt__buf_skip(b, 1);
+        while (b->cursor < b->size) {
+            v = nk_tt__buf_get8(b);
+            if ((v & 0xF) == 0xF || (v >> 4) == 0xF)
+                break;
+        }
+    } else {
+        nk_tt__cff_int(b);
+    }
+}
+NK_INTERN struct nk_tt__buf
+nk_tt__dict_get(struct nk_tt__buf *b, int key)
+{
+    nk_tt__buf_seek(b, 0);
+    while (b->cursor < b->size) {
+        int start = b->cursor, end, op;
+        while (nk_tt__buf_peek8(b) >= 28)
+            nk_tt__cff_skip_operand(b);
+        end = b->cursor;
+        op = nk_tt__buf_get8(b);
+        if (op == 12)  op = nk_tt__buf_get8(b) | 0x100;
+        if (op == key) return nk_tt__buf_range(b, start, end-start);
+    }
+    return nk_tt__buf_range(b, 0, 0);
+}
+NK_INTERN void
+nk_tt__dict_get_ints(struct nk_tt__buf *b, int key, int outcount, NK_UINT32 *out)
+{
+    int i;
+    struct nk_tt__buf operands = nk_tt__dict_get(b, key);
+    for (i = 0; i < outcount && operands.cursor < operands.size; i++)
+        out[i] = nk_tt__cff_int(&operands);
+}
+NK_INTERN int
+nk_tt__cff_index_count(struct nk_tt__buf *b)
+{
+    nk_tt__buf_seek(b, 0);
+    return nk_tt__buf_get16(b);
+}
+NK_INTERN struct nk_tt__buf
+nk_tt__cff_index_get(struct nk_tt__buf b, int i)
+{
+    int count, offsize, start, end;
+    nk_tt__buf_seek(&b, 0);
+    count = nk_tt__buf_get16(&b);
+    offsize = nk_tt__buf_get8(&b);
+    NK_ASSERT(i >= 0 && i < count);
+    NK_ASSERT(offsize >= 1 && offsize <= 4);
+    nk_tt__buf_skip(&b, i*offsize);
+    start = nk_tt__buf_get(&b, offsize);
+    end = nk_tt__buf_get(&b, offsize);
+    return nk_tt__buf_range(&b, 2+(count+1)*offsize+start, end - start);
+}
+
 #define nk_ttBYTE(p)     (* (const nk_byte *) (p))
 #define nk_ttCHAR(p)     (* (const char *) (p))
 
@@ -561,6 +717,19 @@ nk_tt__find_table(const nk_byte *data, nk_uint fontstart, const char *tag)
     }
     return 0;
 }
+NK_INTERN struct nk_tt__buf
+nk_tt__get_subrs(struct nk_tt__buf cff, struct nk_tt__buf fontdict)
+{
+    NK_UINT32 subrsoff = 0, private_loc[2] = { 0, 0 };
+    struct nk_tt__buf pdict;
+    nk_tt__dict_get_ints(&fontdict, 18, 2, private_loc);
+    if (!private_loc[1] || !private_loc[0]) return nk_tt__new_buf(NULL, 0);
+    pdict = nk_tt__buf_range(&cff, private_loc[1], private_loc[0]);
+    nk_tt__dict_get_ints(&pdict, 19, 1, &subrsoff);
+    if (!subrsoff) return nk_tt__new_buf(NULL, 0);
+    nk_tt__buf_seek(&cff, private_loc[1]+subrsoff);
+    return nk_tt__cff_get_index(&cff);
+}
 NK_INTERN int
 nk_tt_InitFont(struct nk_tt_fontinfo *info, const unsigned char *data2, int fontstart)
 {
@@ -570,6 +739,7 @@ nk_tt_InitFont(struct nk_tt_fontinfo *info, const unsigned char *data2, int font
 
     info->data = data;
     info->fontstart = fontstart;
+    info->cff = nk_tt__new_buf(NULL, 0);
 
     cmap = nk_tt__find_table(data, (nk_uint)fontstart, "cmap");       /* required */
     info->loca = (int)nk_tt__find_table(data, (nk_uint)fontstart, "loca"); /* required */
@@ -578,8 +748,62 @@ nk_tt_InitFont(struct nk_tt_fontinfo *info, const unsigned char *data2, int font
     info->hhea = (int)nk_tt__find_table(data, (nk_uint)fontstart, "hhea"); /* required */
     info->hmtx = (int)nk_tt__find_table(data, (nk_uint)fontstart, "hmtx"); /* required */
     info->kern = (int)nk_tt__find_table(data, (nk_uint)fontstart, "kern"); /* not required */
-    if (!cmap || !info->loca || !info->head || !info->glyf || !info->hhea || !info->hmtx)
+    info->gpos = (int)nk_tt__find_table(data, (nk_uint)fontstart, "GPOS"); /* not required */
+
+    if (!cmap || !info->head || !info->hhea || !info->hmtx)
         return 0;
+   if (info->glyf) {
+        /* required for truetype */
+        if (!info->loca) return 0;
+    } else {
+        /* initialization for CFF / Type2 fonts (OTF) */
+        struct nk_tt__buf b, topdict, topdictidx;
+        NK_UINT32 cstype = 2, charstrings = 0, fdarrayoff = 0, fdselectoff = 0;
+        NK_UINT32 cff;
+
+        cff = nk_tt__find_table(data, fontstart, "CFF ");
+        if (!cff) return 0;
+
+        info->fontdicts = nk_tt__new_buf(NULL, 0);
+        info->fdselect = nk_tt__new_buf(NULL, 0);
+
+        /* @TODO this should use size from table (not 512MB) */
+        info->cff = nk_tt__new_buf(data+cff, 512*1024*1024);
+        b = info->cff;
+
+        /* read the header */
+        nk_tt__buf_skip(&b, 2);
+        nk_tt__buf_seek(&b, nk_tt__buf_get8(&b)); /* hdrsize */
+
+        /* @TODO the name INDEX could list multiple fonts, */
+        /* but we just use the first one. */
+        nk_tt__cff_get_index(&b);  /* name INDEX */
+        topdictidx = nk_tt__cff_get_index(&b);
+        topdict = nk_tt__cff_index_get(topdictidx, 0);
+        nk_tt__cff_get_index(&b);  /* string INDEX */
+        info->gsubrs = nk_tt__cff_get_index(&b);
+
+        nk_tt__dict_get_ints(&topdict, 17, 1, &charstrings);
+        nk_tt__dict_get_ints(&topdict, 0x100 | 6, 1, &cstype);
+        nk_tt__dict_get_ints(&topdict, 0x100 | 36, 1, &fdarrayoff);
+        nk_tt__dict_get_ints(&topdict, 0x100 | 37, 1, &fdselectoff);
+        info->subrs = nk_tt__get_subrs(b, topdict);
+
+        /* we only support Type 2 charstrings */
+        if (cstype != 2) return 0;
+        if (charstrings == 0) return 0;
+
+        if (fdarrayoff) {
+            /* looks like a CID font */
+            if (!fdselectoff) return 0;
+            nk_tt__buf_seek(&b, fdarrayoff);
+            info->fontdicts = nk_tt__cff_get_index(&b);
+            info->fdselect = nk_tt__buf_range(&b, fdselectoff, b.size-fdselectoff);
+        }
+
+        nk_tt__buf_seek(&b, charstrings);
+        info->charstrings = nk_tt__cff_get_index(&b);
+    }
 
     t = nk_tt__find_table(data, (nk_uint)fontstart, "maxp");
     if (t) info->numGlyphs = nk_ttUSHORT(data+t+4);
@@ -723,6 +947,7 @@ NK_INTERN int
 nk_tt__GetGlyfOffset(const struct nk_tt_fontinfo *info, int glyph_index)
 {
     int g1,g2;
+    NK_ASSERT(!info->cff.size);
     if (glyph_index >= info->numGlyphs) return -1; /* glyph index out of range */
     if (info->indexToLocFormat >= 2)    return -1; /* unknown index->glyph map format */
 
@@ -735,17 +960,421 @@ nk_tt__GetGlyfOffset(const struct nk_tt_fontinfo *info, int glyph_index)
     }
     return g1==g2 ? -1 : g1; /* if length is 0, return -1 */
 }
+struct nk_tt__csctx {
+    int bounds;
+    int started;
+    float first_x, first_y;
+    float x, y;
+    NK_INT32 min_x, max_x, min_y, max_y;
+
+    struct nk_tt_vertex *pvertices;
+    int num_vertices;
+};
+#define NK_TT__CSCTX_INIT(bounds) {bounds,0, 0,0, 0,0, 0,0,0,0, NULL, 0}
+NK_INTERN void
+nk_tt__track_vertex(struct nk_tt__csctx *c, NK_INT32 x, NK_INT32 y)
+{
+    if (x > c->max_x || !c->started) c->max_x = x;
+    if (y > c->max_y || !c->started) c->max_y = y;
+    if (x < c->min_x || !c->started) c->min_x = x;
+    if (y < c->min_y || !c->started) c->min_y = y;
+    c->started = 1;
+}
+NK_INTERN void
+nk_tt__csctx_v(struct nk_tt__csctx *c, NK_UINT8 type, NK_INT32 x, NK_INT32 y, NK_INT32 cx, NK_INT32 cy, NK_INT32 cx1, NK_INT32 cy1)
+{
+    if (c->bounds) {
+        nk_tt__track_vertex(c, x, y);
+        if (type == NK_TT_vcubic) {
+            nk_tt__track_vertex(c, cx, cy);
+            nk_tt__track_vertex(c, cx1, cy1);
+        }
+    } else {
+        nk_tt_setvertex(&c->pvertices[c->num_vertices], type, x, y, cx, cy);
+        c->pvertices[c->num_vertices].cx1 = (NK_INT16) cx1;
+        c->pvertices[c->num_vertices].cy1 = (NK_INT16) cy1;
+    }
+    c->num_vertices++;
+}
+NK_INTERN void
+nk_tt__csctx_close_shape(struct nk_tt__csctx *ctx)
+{
+    if (ctx->first_x != ctx->x || ctx->first_y != ctx->y)
+        nk_tt__csctx_v(ctx, NK_TT_vline, (int)ctx->first_x, (int)ctx->first_y, 0, 0, 0, 0);
+}
+NK_INTERN void
+nk_tt__csctx_rmove_to(struct nk_tt__csctx *ctx, float dx, float dy)
+{
+    nk_tt__csctx_close_shape(ctx);
+    ctx->first_x = ctx->x = ctx->x + dx;
+    ctx->first_y = ctx->y = ctx->y + dy;
+    nk_tt__csctx_v(ctx, NK_TT_vmove, (int)ctx->x, (int)ctx->y, 0, 0, 0, 0);
+}
+NK_INTERN void
+nk_tt__csctx_rline_to(struct nk_tt__csctx *ctx, float dx, float dy)
+{
+    ctx->x += dx;
+    ctx->y += dy;
+    nk_tt__csctx_v(ctx, NK_TT_vline, (int)ctx->x, (int)ctx->y, 0, 0, 0, 0);
+}
+NK_INTERN void
+nk_tt__csctx_rccurve_to(struct nk_tt__csctx *ctx, float dx1, float dy1, float dx2, float dy2, float dx3, float dy3)
+{
+    float cx1 = ctx->x + dx1;
+    float cy1 = ctx->y + dy1;
+    float cx2 = cx1 + dx2;
+    float cy2 = cy1 + dy2;
+    ctx->x = cx2 + dx3;
+    ctx->y = cy2 + dy3;
+    nk_tt__csctx_v(ctx, NK_TT_vcubic, (int)ctx->x, (int)ctx->y, (int)cx1, (int)cy1, (int)cx2, (int)cy2);
+}
+NK_INTERN struct nk_tt__buf
+nk_tt__get_subr(struct nk_tt__buf idx, int n)
+{
+    int count = nk_tt__cff_index_count(&idx);
+    int bias = 107;
+    if (count >= 33900)
+        bias = 32768;
+    else if (count >= 1240)
+        bias = 1131;
+    n += bias;
+    if (n < 0 || n >= count)
+        return nk_tt__new_buf(NULL, 0);
+    return nk_tt__cff_index_get(idx, n);
+}
+NK_INTERN struct nk_tt__buf
+nk_tt__cid_get_glyph_subrs(const struct nk_tt_fontinfo *info, int glyph_index)
+{
+    struct nk_tt__buf fdselect = info->fdselect;
+    int nranges, start, end, v, fmt, fdselector = -1, i;
+
+    nk_tt__buf_seek(&fdselect, 0);
+    fmt = nk_tt__buf_get8(&fdselect);
+    if (fmt == 0) {
+        /* untested */
+        nk_tt__buf_skip(&fdselect, glyph_index);
+        fdselector = nk_tt__buf_get8(&fdselect);
+    } else if (fmt == 3) {
+        nranges = nk_tt__buf_get16(&fdselect);
+        start = nk_tt__buf_get16(&fdselect);
+        for (i = 0; i < nranges; i++) {
+            v = nk_tt__buf_get8(&fdselect);
+            end = nk_tt__buf_get16(&fdselect);
+            if (glyph_index >= start && glyph_index < end) {
+                fdselector = v;
+                break;
+            }
+            start = end;
+        }
+    }
+    if (fdselector == -1) nk_tt__new_buf(NULL, 0);
+    return nk_tt__get_subrs(info->cff, nk_tt__cff_index_get(info->fontdicts, fdselector));
+}
+NK_INTERN int
+nk_tt__run_charstring(const struct nk_tt_fontinfo *info, int glyph_index,
+    struct nk_tt__csctx *c)
+{
+   int in_header = 1, maskbits = 0, subr_stack_height = 0, sp = 0, v, i, b0;
+   int has_subrs = 0, clear_stack;
+   float s[48];
+   struct nk_tt__buf subr_stack[10], subrs = info->subrs, b;
+   float f;
+
+#define NK_TT__CSERR(s) (0)
+
+   // this currently ignores the initial width value, which isn't needed if we have hmtx
+   b = nk_tt__cff_index_get(info->charstrings, glyph_index);
+   while (b.cursor < b.size) {
+      i = 0;
+      clear_stack = 1;
+      b0 = nk_tt__buf_get8(&b);
+      switch (b0) {
+      // @TODO implement hinting
+      case 0x13: // hintmask
+      case 0x14: // cntrmask
+         if (in_header)
+            maskbits += (sp / 2); // implicit "vstem"
+         in_header = 0;
+         nk_tt__buf_skip(&b, (maskbits + 7) / 8);
+         break;
+
+      case 0x01: // hstem
+      case 0x03: // vstem
+      case 0x12: // hstemhm
+      case 0x17: // vstemhm
+         maskbits += (sp / 2);
+         break;
+
+      case 0x15: // rmoveto
+         in_header = 0;
+         if (sp < 2) return NK_TT__CSERR("rmoveto stack");
+         nk_tt__csctx_rmove_to(c, s[sp-2], s[sp-1]);
+         break;
+      case 0x04: // vmoveto
+         in_header = 0;
+         if (sp < 1) return NK_TT__CSERR("vmoveto stack");
+         nk_tt__csctx_rmove_to(c, 0, s[sp-1]);
+         break;
+      case 0x16: // hmoveto
+         in_header = 0;
+         if (sp < 1) return NK_TT__CSERR("hmoveto stack");
+         nk_tt__csctx_rmove_to(c, s[sp-1], 0);
+         break;
+
+      case 0x05: // rlineto
+         if (sp < 2) return NK_TT__CSERR("rlineto stack");
+         for (; i + 1 < sp; i += 2)
+            nk_tt__csctx_rline_to(c, s[i], s[i+1]);
+         break;
+
+      // hlineto/vlineto and vhcurveto/hvcurveto alternate horizontal and vertical
+      // starting from a different place.
+
+      case 0x07: // vlineto
+         if (sp < 1) return NK_TT__CSERR("vlineto stack");
+         goto vlineto;
+      case 0x06: // hlineto
+         if (sp < 1) return NK_TT__CSERR("hlineto stack");
+         for (;;) {
+            if (i >= sp) break;
+            nk_tt__csctx_rline_to(c, s[i], 0);
+            i++;
+      vlineto:
+            if (i >= sp) break;
+            nk_tt__csctx_rline_to(c, 0, s[i]);
+            i++;
+         }
+         break;
+
+      case 0x1F: // hvcurveto
+         if (sp < 4) return NK_TT__CSERR("hvcurveto stack");
+         goto hvcurveto;
+      case 0x1E: // vhcurveto
+         if (sp < 4) return NK_TT__CSERR("vhcurveto stack");
+         for (;;) {
+            if (i + 3 >= sp) break;
+            nk_tt__csctx_rccurve_to(c, 0, s[i], s[i+1], s[i+2], s[i+3], (sp - i == 5) ? s[i + 4] : 0.0f);
+            i += 4;
+      hvcurveto:
+            if (i + 3 >= sp) break;
+            nk_tt__csctx_rccurve_to(c, s[i], 0, s[i+1], s[i+2], (sp - i == 5) ? s[i+4] : 0.0f, s[i+3]);
+            i += 4;
+         }
+         break;
+
+      case 0x08: // rrcurveto
+         if (sp < 6) return NK_TT__CSERR("rcurveline stack");
+         for (; i + 5 < sp; i += 6)
+            nk_tt__csctx_rccurve_to(c, s[i], s[i+1], s[i+2], s[i+3], s[i+4], s[i+5]);
+         break;
+
+      case 0x18: // rcurveline
+         if (sp < 8) return NK_TT__CSERR("rcurveline stack");
+         for (; i + 5 < sp - 2; i += 6)
+            nk_tt__csctx_rccurve_to(c, s[i], s[i+1], s[i+2], s[i+3], s[i+4], s[i+5]);
+         if (i + 1 >= sp) return NK_TT__CSERR("rcurveline stack");
+         nk_tt__csctx_rline_to(c, s[i], s[i+1]);
+         break;
+
+      case 0x19: // rlinecurve
+         if (sp < 8) return NK_TT__CSERR("rlinecurve stack");
+         for (; i + 1 < sp - 6; i += 2)
+            nk_tt__csctx_rline_to(c, s[i], s[i+1]);
+         if (i + 5 >= sp) return NK_TT__CSERR("rlinecurve stack");
+         nk_tt__csctx_rccurve_to(c, s[i], s[i+1], s[i+2], s[i+3], s[i+4], s[i+5]);
+         break;
+
+      case 0x1A: // vvcurveto
+      case 0x1B: // hhcurveto
+         if (sp < 4) return NK_TT__CSERR("(vv|hh)curveto stack");
+         f = 0.0;
+         if (sp & 1) { f = s[i]; i++; }
+         for (; i + 3 < sp; i += 4) {
+            if (b0 == 0x1B)
+               nk_tt__csctx_rccurve_to(c, s[i], f, s[i+1], s[i+2], s[i+3], 0.0);
+            else
+               nk_tt__csctx_rccurve_to(c, f, s[i], s[i+1], s[i+2], 0.0, s[i+3]);
+            f = 0.0;
+         }
+         break;
+
+      case 0x0A: // callsubr
+         if (!has_subrs) {
+            if (info->fdselect.size)
+               subrs = nk_tt__cid_get_glyph_subrs(info, glyph_index);
+            has_subrs = 1;
+         }
+         // fallthrough
+      case 0x1D: // callgsubr
+         if (sp < 1) return NK_TT__CSERR("call(g|)subr stack");
+         v = (int) s[--sp];
+         if (subr_stack_height >= 10) return NK_TT__CSERR("recursion limit");
+         subr_stack[subr_stack_height++] = b;
+         b = nk_tt__get_subr(b0 == 0x0A ? subrs : info->gsubrs, v);
+         if (b.size == 0) return NK_TT__CSERR("subr not found");
+         b.cursor = 0;
+         clear_stack = 0;
+         break;
+
+      case 0x0B: // return
+         if (subr_stack_height <= 0) return NK_TT__CSERR("return outside subr");
+         b = subr_stack[--subr_stack_height];
+         clear_stack = 0;
+         break;
+
+      case 0x0E: // endchar
+         nk_tt__csctx_close_shape(c);
+         return 1;
+
+      case 0x0C: { // two-byte escape
+         float dx1, dx2, dx3, dx4, dx5, dx6, dy1, dy2, dy3, dy4, dy5, dy6;
+         float dx, dy;
+         int b1 = nk_tt__buf_get8(&b);
+         switch (b1) {
+         // @TODO These "flex" implementations ignore the flex-depth and resolution,
+         // and always draw beziers.
+         case 0x22: // hflex
+            if (sp < 7) return NK_TT__CSERR("hflex stack");
+            dx1 = s[0];
+            dx2 = s[1];
+            dy2 = s[2];
+            dx3 = s[3];
+            dx4 = s[4];
+            dx5 = s[5];
+            dx6 = s[6];
+            nk_tt__csctx_rccurve_to(c, dx1, 0, dx2, dy2, dx3, 0);
+            nk_tt__csctx_rccurve_to(c, dx4, 0, dx5, -dy2, dx6, 0);
+            break;
+
+         case 0x23: // flex
+            if (sp < 13) return NK_TT__CSERR("flex stack");
+            dx1 = s[0];
+            dy1 = s[1];
+            dx2 = s[2];
+            dy2 = s[3];
+            dx3 = s[4];
+            dy3 = s[5];
+            dx4 = s[6];
+            dy4 = s[7];
+            dx5 = s[8];
+            dy5 = s[9];
+            dx6 = s[10];
+            dy6 = s[11];
+            //fd is s[12]
+            nk_tt__csctx_rccurve_to(c, dx1, dy1, dx2, dy2, dx3, dy3);
+            nk_tt__csctx_rccurve_to(c, dx4, dy4, dx5, dy5, dx6, dy6);
+            break;
+
+         case 0x24: // hflex1
+            if (sp < 9) return NK_TT__CSERR("hflex1 stack");
+            dx1 = s[0];
+            dy1 = s[1];
+            dx2 = s[2];
+            dy2 = s[3];
+            dx3 = s[4];
+            dx4 = s[5];
+            dx5 = s[6];
+            dy5 = s[7];
+            dx6 = s[8];
+            nk_tt__csctx_rccurve_to(c, dx1, dy1, dx2, dy2, dx3, 0);
+            nk_tt__csctx_rccurve_to(c, dx4, 0, dx5, dy5, dx6, -(dy1+dy2+dy5));
+            break;
+
+         case 0x25: // flex1
+            if (sp < 11) return NK_TT__CSERR("flex1 stack");
+            dx1 = s[0];
+            dy1 = s[1];
+            dx2 = s[2];
+            dy2 = s[3];
+            dx3 = s[4];
+            dy3 = s[5];
+            dx4 = s[6];
+            dy4 = s[7];
+            dx5 = s[8];
+            dy5 = s[9];
+            dx6 = dy6 = s[10];
+            dx = dx1+dx2+dx3+dx4+dx5;
+            dy = dy1+dy2+dy3+dy4+dy5;
+            if (NK_ABS(dx) > NK_ABS(dy))
+               dy6 = -dy;
+            else
+               dx6 = -dx;
+            nk_tt__csctx_rccurve_to(c, dx1, dy1, dx2, dy2, dx3, dy3);
+            nk_tt__csctx_rccurve_to(c, dx4, dy4, dx5, dy5, dx6, dy6);
+            break;
+
+         default:
+            return NK_TT__CSERR("unimplemented");
+         }
+      } break;
+
+      default:
+         if (b0 != 255 && b0 != 28 && (b0 < 32 || b0 > 254))
+            return NK_TT__CSERR("reserved operator");
+
+         // push immediate
+         if (b0 == 255) {
+            f = (float)(NK_INT32)nk_tt__buf_get32(&b) / 0x10000;
+         } else {
+            nk_tt__buf_skip(&b, -1);
+            f = (float)(NK_INT16)nk_tt__cff_int(&b);
+         }
+         if (sp >= 48) return NK_TT__CSERR("push stack overflow");
+         s[sp++] = f;
+         clear_stack = 0;
+         break;
+      }
+      if (clear_stack) sp = 0;
+   }
+   return NK_TT__CSERR("no endchar");
+
+#undef NK_TT__CSERR
+}
+NK_INTERN int
+nk_tt__GetGlyphShapeT2(const struct nk_tt_fontinfo *info, struct nk_allocator *alloc,
+    int glyph_index, struct nk_tt_vertex **pvertices)
+{
+    /* runs the charstring twice, once to count and once to output (to avoid realloc) */
+    struct nk_tt__csctx count_ctx = NK_TT__CSCTX_INIT(1);
+    struct nk_tt__csctx output_ctx = NK_TT__CSCTX_INIT(0);
+    if (nk_tt__run_charstring(info, glyph_index, &count_ctx)) {
+        *pvertices = (struct nk_tt_vertex *)alloc->alloc(alloc->userdata, 0, (nk_size)count_ctx.num_vertices*sizeof(struct nk_tt_vertex));
+        output_ctx.pvertices = *pvertices;
+        if (nk_tt__run_charstring(info, glyph_index, &output_ctx)) {
+            NK_ASSERT(output_ctx.num_vertices == count_ctx.num_vertices);
+            return output_ctx.num_vertices;
+        }
+    }
+    *pvertices = NULL;
+    return 0;
+}
+NK_INTERN int
+nk_tt__GetGlyphInfoT2(const struct nk_tt_fontinfo *info, int glyph_index,
+    int *x0, int *y0, int *x1, int *y1)
+{
+   struct nk_tt__csctx c = NK_TT__CSCTX_INIT(1);
+   int r = nk_tt__run_charstring(info, glyph_index, &c);
+   if (x0)  *x0 = r ? c.min_x : 0;
+   if (y0)  *y0 = r ? c.min_y : 0;
+   if (x1)  *x1 = r ? c.max_x : 0;
+   if (y1)  *y1 = r ? c.max_y : 0;
+   return r ? c.num_vertices : 0;
+}
 NK_INTERN int
 nk_tt_GetGlyphBox(const struct nk_tt_fontinfo *info, int glyph_index,
     int *x0, int *y0, int *x1, int *y1)
 {
-    int g = nk_tt__GetGlyfOffset(info, glyph_index);
-    if (g < 0) return 0;
+    if (info->cff.size) {
+        nk_tt__GetGlyphInfoT2(info, glyph_index, x0, y0, x1, y1);
+    } else {
+        int g = nk_tt__GetGlyfOffset(info, glyph_index);
+        if (g < 0) return 0;
 
-    if (x0) *x0 = nk_ttSHORT(info->data + g + 2);
-    if (y0) *y0 = nk_ttSHORT(info->data + g + 4);
-    if (x1) *x1 = nk_ttSHORT(info->data + g + 6);
-    if (y1) *y1 = nk_ttSHORT(info->data + g + 8);
+        if (x0) *x0 = nk_ttSHORT(info->data + g + 2);
+        if (y0) *y0 = nk_ttSHORT(info->data + g + 4);
+        if (x1) *x1 = nk_ttSHORT(info->data + g + 6);
+        if (y1) *y1 = nk_ttSHORT(info->data + g + 8);
+    }
     return 1;
 }
 NK_INTERN int
@@ -765,7 +1394,7 @@ nk_tt__close_shape(struct nk_tt_vertex *vertices, int num_vertices, int was_off,
    return num_vertices;
 }
 NK_INTERN int
-nk_tt_GetGlyphShape(const struct nk_tt_fontinfo *info, struct nk_allocator *alloc,
+nk_tt__GetGlyphShapeTT(const struct nk_tt_fontinfo *info, struct nk_allocator *alloc,
     int glyph_index, struct nk_tt_vertex **pvertices)
 {
     nk_short numberOfContours;
@@ -987,6 +1616,15 @@ nk_tt_GetGlyphShape(const struct nk_tt_fontinfo *info, struct nk_allocator *allo
     *pvertices = vertices;
     return num_vertices;
 }
+NK_INTERN int
+nk_tt_GetGlyphShape(const struct nk_tt_fontinfo *info, struct nk_allocator *alloc,
+    int glyph_index, struct nk_tt_vertex **pvertices)
+{
+   if (!info->cff.size)
+      return nk_tt__GetGlyphShapeTT(info, alloc, glyph_index, pvertices);
+   else
+      return nk_tt__GetGlyphShapeT2(info, alloc, glyph_index, pvertices);
+}
 NK_INTERN void
 nk_tt_GetGlyphHMetrics(const struct nk_tt_fontinfo *info, int glyph_index,
     int *advanceWidth, int *leftSideBearing)
@@ -1033,7 +1671,7 @@ nk_tt_GetGlyphBitmapBoxSubpixel(const struct nk_tt_fontinfo *font,
     int glyph, float scale_x, float scale_y,float shift_x, float shift_y,
     int *ix0, int *iy0, int *ix1, int *iy1)
 {
-    int x0,y0,x1,y1;
+    int x0=0,y0=0,x1,y1; /* =0 suppresses compiler warning */
     if (!nk_tt_GetGlyphBox(font, glyph, &x0,&y0,&x1,&y1)) {
         /* e.g. space character */
         if (ix0) *ix0 = 0;
@@ -1077,7 +1715,7 @@ nk_tt__hheap_alloc(struct nk_tt__hheap *hh, nk_size size)
             hh->num_remaining_in_head_chunk = count;
         }
         --hh->num_remaining_in_head_chunk;
-        return (char *) (hh->head) + size * (nk_size)hh->num_remaining_in_head_chunk;
+        return (char *) (hh->head) + sizeof(struct nk_tt__hheap_chunk) + size * (nk_size)hh->num_remaining_in_head_chunk;
     }
 }
 NK_INTERN void
@@ -1103,10 +1741,10 @@ nk_tt__new_active(struct nk_tt__hheap *hh, struct nk_tt__edge *e,
     struct nk_tt__active_edge *z = (struct nk_tt__active_edge *)
         nk_tt__hheap_alloc(hh, sizeof(*z));
     float dxdy = (e->x1 - e->x0) / (e->y1 - e->y0);
-    /*STBTT_assert(e->y0 <= start_point); */
+    /*NK_ASSERT(e->y0 <= start_point); */
     if (!z) return z;
     z->fdx = dxdy;
-    z->fdy = (dxdy != 0) ? (1/dxdy): 0;
+    z->fdy = (dxdy != 0.0f) ? (1.0f/dxdy): 0.0f;
     z->fx = e->x0 + dxdy * (start_point - e->y0);
     z->fx -= (float)off_x;
     z->direction = e->invert ? 1.0f : -1.0f;
@@ -1173,7 +1811,7 @@ nk_tt__fill_active_edges_new(float *scanline, float *scanline_fill, int len,
             float dx = e->fdx;
             float xb = x0 + dx;
             float x_top, x_bottom;
-            float y0,y1;
+            float sy0,sy1;
             float dy = e->fdy;
             NK_ASSERT(e->sy <= y_bottom && e->ey >= y_top);
 
@@ -1182,18 +1820,18 @@ nk_tt__fill_active_edges_new(float *scanline, float *scanline_fill, int len,
             /* line with y_top, but that may be off the line segment. */
             if (e->sy > y_top) {
                 x_top = x0 + dx * (e->sy - y_top);
-                y0 = e->sy;
+                sy0 = e->sy;
             } else {
                 x_top = x0;
-                y0 = y_top;
+                sy0 = y_top;
             }
 
             if (e->ey < y_bottom) {
                 x_bottom = x0 + dx * (e->ey - y_top);
-                y1 = e->ey;
+                sy1 = e->ey;
             } else {
                 x_bottom = xb;
-                y1 = y_bottom;
+                sy1 = y_bottom;
             }
 
             if (x_top >= 0 && x_bottom >= 0 && x_top < len && x_bottom < len)
@@ -1203,7 +1841,7 @@ nk_tt__fill_active_edges_new(float *scanline, float *scanline_fill, int len,
                     float height;
                     /* simple case, only spans one pixel */
                     int x = (int) x_top;
-                    height = y1 - y0;
+                    height = sy1 - sy0;
                     NK_ASSERT(x >= 0 && x < len);
                     scanline[x] += e->direction * (1.0f-(((float)x_top - (float)x) + ((float)x_bottom-(float)x))/2.0f)  * (float)height;
                     scanline_fill[x] += e->direction * (float)height; /* everything right of this pixel is filled */
@@ -1215,9 +1853,9 @@ nk_tt__fill_active_edges_new(float *scanline, float *scanline_fill, int len,
                     {
                         /* flip scanline vertically; signed area is the same */
                         float t;
-                        y0 = y_bottom - (y0 - y_top);
-                        y1 = y_bottom - (y1 - y_top);
-                        t = y0; y0 = y1; y1 = t;
+                        sy0 = y_bottom - (sy0 - y_top);
+                        sy1 = y_bottom - (sy1 - y_top);
+                        t = sy0; sy0 = sy1; sy1 = t;
                         t = x_bottom; x_bottom = x_top; x_top = t;
                         dx = -dx;
                         dy = -dy;
@@ -1231,7 +1869,7 @@ nk_tt__fill_active_edges_new(float *scanline, float *scanline_fill, int len,
 
                     sign = e->direction;
                     /* area of the rectangle covered from y0..y_crossing */
-                    area = sign * (y_crossing-y0);
+                    area = sign * (y_crossing-sy0);
                     /* area of the triangle (x_top,y0), (x+1,y0), (x+1,y_crossing) */
                     scanline[x1] += area * (1.0f-((float)((float)x_top - (float)x1)+(float)(x1+1-x1))/2.0f);
 
@@ -1242,8 +1880,10 @@ nk_tt__fill_active_edges_new(float *scanline, float *scanline_fill, int len,
                     }
                     y_crossing += (float)dy * (float)(x2 - (x1+1));
 
-                    scanline[x2] += area + sign * (1.0f-((float)(x2-x2)+((float)x_bottom-(float)x2))/2.0f) * (y1-y_crossing);
-                    scanline_fill[x2] += sign * (y1-y0);
+                    NK_ASSERT(NK_ABS(area) <= 1.01f);
+
+                    scanline[x2] += area + sign * (1.0f-((float)(x2-x2)+((float)x_bottom-(float)x2))/2.0f) * (sy1-y_crossing);
+                    scanline_fill[x2] += sign * (sy1-sy0);
                 }
             }
             else
@@ -1269,38 +1909,37 @@ nk_tt__fill_active_edges_new(float *scanline, float *scanline_fill, int len,
                     /* that, we need to explicitly produce segments based on x positions. */
 
                     /* rename variables to clear pairs */
-                    float ya = y_top;
+                    float y0 = y_top;
                     float x1 = (float) (x);
                     float x2 = (float) (x+1);
                     float x3 = xb;
                     float y3 = y_bottom;
-                    float yb,y2;
 
-                    yb = ((float)x - x0) / dx + y_top;
-                    y2 = ((float)x+1 - x0) / dx + y_top;
+                    float y1 = ((float)x - x0) / dx + y_top;
+                    float y2 = ((float)x+1 - x0) / dx + y_top;
 
                     if (x0 < x1 && x3 > x2) {         /* three segments descending down-right */
-                        nk_tt__handle_clipped_edge(scanline,x,e, x0,ya, x1,yb);
-                        nk_tt__handle_clipped_edge(scanline,x,e, x1,yb, x2,y2);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x0,y0, x1,y1);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x1,y1, x2,y2);
                         nk_tt__handle_clipped_edge(scanline,x,e, x2,y2, x3,y3);
                     } else if (x3 < x1 && x0 > x2) {  /* three segments descending down-left */
-                        nk_tt__handle_clipped_edge(scanline,x,e, x0,ya, x2,y2);
-                        nk_tt__handle_clipped_edge(scanline,x,e, x2,y2, x1,yb);
-                        nk_tt__handle_clipped_edge(scanline,x,e, x1,yb, x3,y3);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x0,y0, x2,y2);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x2,y2, x1,y1);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x1,y1, x3,y3);
                     } else if (x0 < x1 && x3 > x1) {  /* two segments across x, down-right */
-                        nk_tt__handle_clipped_edge(scanline,x,e, x0,ya, x1,yb);
-                        nk_tt__handle_clipped_edge(scanline,x,e, x1,yb, x3,y3);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x0,y0, x1,y1);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x1,y1, x3,y3);
                     } else if (x3 < x1 && x0 > x1) {  /* two segments across x, down-left */
-                        nk_tt__handle_clipped_edge(scanline,x,e, x0,ya, x1,yb);
-                        nk_tt__handle_clipped_edge(scanline,x,e, x1,yb, x3,y3);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x0,y0, x1,y1);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x1,y1, x3,y3);
                     } else if (x0 < x2 && x3 > x2) {  /* two segments across x+1, down-right */
-                        nk_tt__handle_clipped_edge(scanline,x,e, x0,ya, x2,y2);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x0,y0, x2,y2);
                         nk_tt__handle_clipped_edge(scanline,x,e, x2,y2, x3,y3);
                     } else if (x3 < x2 && x0 > x2) {  /* two segments across x+1, down-left */
-                        nk_tt__handle_clipped_edge(scanline,x,e, x0,ya, x2,y2);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x0,y0, x2,y2);
                         nk_tt__handle_clipped_edge(scanline,x,e, x2,y2, x3,y3);
                     } else {  /* one segment */
-                        nk_tt__handle_clipped_edge(scanline,x,e, x0,ya, x3,y3);
+                        nk_tt__handle_clipped_edge(scanline,x,e, x0,y0, x3,y3);
                     }
                 }
             }
@@ -1558,8 +2197,6 @@ nk_tt__tesselate_curve(struct nk_tt__point *points, int *num_points,
     float x0, float y0, float x1, float y1, float x2, float y2,
     float objspace_flatness_squared, int n)
 {
-    /* tesselate until threshold p is happy...
-     * @TODO warped to compensate for non-linear stretching */
     /* midpoint */
     float mx = (x0 + 2*x1 + x2)/4;
     float my = (y0 + 2*y1 + y2)/4;
@@ -1580,6 +2217,50 @@ nk_tt__tesselate_curve(struct nk_tt__point *points, int *num_points,
         *num_points = *num_points+1;
     }
     return 1;
+}
+NK_INTERN void
+nk_tt__tesselate_cubic(struct nk_tt__point *points, int *num_points,
+    float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+    float objspace_flatness_squared, int n)
+{
+    /* @TODO this "flatness" calculation is just made-up nonsense that seems to work well enough */
+    float dx0 = x1-x0;
+    float dy0 = y1-y0;
+    float dx1 = x2-x1;
+    float dy1 = y2-y1;
+    float dx2 = x3-x2;
+    float dy2 = y3-y2;
+    float dx = x3-x0;
+    float dy = y3-y0;
+    float longlen = (float) (nk_sqrt(dx0*dx0+dy0*dy0)+nk_sqrt(dx1*dx1+dy1*dy1)+nk_sqrt(dx2*dx2+dy2*dy2));
+    float shortlen = (float) nk_sqrt(dx*dx+dy*dy);
+    float flatness_squared = longlen*longlen-shortlen*shortlen;
+
+    if (n > 16) /* 65536 segments on one curve better be enough! */
+        return;
+
+    if (flatness_squared > objspace_flatness_squared) {
+        float x01 = (x0+x1)/2;
+        float y01 = (y0+y1)/2;
+        float x12 = (x1+x2)/2;
+        float y12 = (y1+y2)/2;
+        float x23 = (x2+x3)/2;
+        float y23 = (y2+y3)/2;
+
+        float xa = (x01+x12)/2;
+        float ya = (y01+y12)/2;
+        float xb = (x12+x23)/2;
+        float yb = (y12+y23)/2;
+
+        float mx = (xa+xb)/2;
+        float my = (ya+yb)/2;
+
+        nk_tt__tesselate_cubic(points, num_points, x0,y0, x01,y01, xa,ya, mx,my, objspace_flatness_squared,n+1);
+        nk_tt__tesselate_cubic(points, num_points, mx,my, xb,yb, x23,y23, x3,y3, objspace_flatness_squared,n+1);
+    } else {
+        nk_tt__add_point(points, *num_points,x3,y3);
+        *num_points = *num_points+1;
+    }
 }
 NK_INTERN struct nk_tt__point*
 nk_tt_FlattenCurves(struct nk_tt_vertex *vertices, int num_verts,
@@ -1635,16 +2316,24 @@ nk_tt_FlattenCurves(struct nk_tt_vertex *vertices, int num_verts,
                 nk_tt__add_point(points, num_points++, x,y);
                 break;
             case NK_TT_vline:
-               x = vertices[i].x, y = vertices[i].y;
-               nk_tt__add_point(points, num_points++, x, y);
-               break;
+                x = vertices[i].x, y = vertices[i].y;
+                nk_tt__add_point(points, num_points++, x, y);
+                break;
             case NK_TT_vcurve:
-               nk_tt__tesselate_curve(points, &num_points, x,y,
-                                        vertices[i].cx, vertices[i].cy,
-                                        vertices[i].x,  vertices[i].y,
-                                        objspace_flatness_squared, 0);
-               x = vertices[i].x, y = vertices[i].y;
-               break;
+                nk_tt__tesselate_curve(points, &num_points, x,y,
+                                       vertices[i].cx, vertices[i].cy,
+                                       vertices[i].x,  vertices[i].y,
+                                       objspace_flatness_squared, 0);
+                x = vertices[i].x, y = vertices[i].y;
+                break;
+            case NK_TT_vcubic:
+                nk_tt__tesselate_cubic(points, &num_points, x,y,
+                                       vertices[i].cx,  vertices[i].cy,
+                                       vertices[i].cx1, vertices[i].cy1,
+                                       vertices[i].x,   vertices[i].y,
+                                       objspace_flatness_squared, 0);
+                x = vertices[i].x, y = vertices[i].y;
+                break;
             default: break;
          }
       }
