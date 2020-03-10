@@ -1,17 +1,5 @@
 # Nuklear
 
-## ALL DEVELOPMENT MOVED ELSEWHERE
-
-Dear visitor,
-
-this repository, issue tracker, etc. is abandoned in favor of https://github.com/Immediate-Mode-UI/Nuklear . Any activity in this issue tracker, any pull requests, etc. will be ignored.
-
-Looking forward to hearing from you in https://github.com/Immediate-Mode-UI/Nuklear
-
-*Nuklear community*
-
-[![Build Status](https://travis-ci.org/vurtun/nuklear.svg)](https://travis-ci.org/vurtun/nuklear)
-
 This is a minimal state immediate mode graphical user interface toolkit
 written in ANSI C and licensed under public domain. It was designed as a simple
 embeddable user interface for application and does not have any dependencies,
@@ -35,7 +23,7 @@ render backends it only focuses on the actual UI.
 - No global or hidden state
 - Customizable library modules (you can compile and use only what you need)
 - Optional font baker and vertex buffer output
-- [Documentation](https://cdn.statically.io/gh/vurtun/nuklear/master/doc/nuklear.html)
+- [Documentation](https://cdn.statically.io/gh/Immediate-Mode-UI/nuklear/master/doc/nuklear.html)
 
 ## Building
 
@@ -132,7 +120,7 @@ Big thank you to Omar Cornut (ocornut@github) for his [imgui](https://github.com
 giving me the inspiration for this library, Casey Muratori for handmade hero
 and his original immediate mode graphical user interface idea and Sean
 Barrett for his amazing single header [libraries](https://github.com/nothings/stb) which restored my faith
-in libraries and brought me to create some of my own. Finally Apoorva Joshi for his singe-header [file packer](http://apoorvaj.io/single-header-packer.html).
+in libraries and brought me to create some of my own. Finally Apoorva Joshi for his single-header [file packer](http://apoorvaj.io/single-header-packer.html).
 
 ## License
 ```
