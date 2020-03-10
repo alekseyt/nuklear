@@ -3722,6 +3722,12 @@ NK_API struct nk_vec2 nk_rect_pos(struct nk_rect);
 NK_API struct nk_vec2 nk_rect_size(struct nk_rect);
 /* =============================================================================
  *
+ *                                  UTIL
+ *
+ * ============================================================================= */
+NK_API int nk_text_clamp(const struct nk_user_font *font, const char *text, int text_len, float space, int *glyphs, float *text_width, nk_rune *sep_list, int sep_count);
+/* =============================================================================
+ *
  *                                  STRING
  *
  * ============================================================================= */
@@ -5822,7 +5828,6 @@ NK_LIB void nk_zero(void *ptr, nk_size size);
 NK_LIB char *nk_itoa(char *s, long n);
 NK_LIB int nk_string_float_limit(char *string, int prec);
 NK_LIB char *nk_dtoa(char *s, double n);
-NK_LIB int nk_text_clamp(const struct nk_user_font *font, const char *text, int text_len, float space, int *glyphs, float *text_width, nk_rune *sep_list, int sep_count);
 NK_LIB struct nk_vec2 nk_text_calculate_text_bounds(const struct nk_user_font *font, const char *begin, int byte_len, float row_height, const char **remaining, struct nk_vec2 *out_offset, int *glyphs, int op);
 #ifdef NK_INCLUDE_STANDARD_VARARGS
 NK_LIB int nk_strfmt(char *buf, int buf_size, const char *fmt, va_list args);
@@ -7328,7 +7333,7 @@ nk_file_load(const char* path, nk_size* siz, struct nk_allocator *alloc)
     return buf;
 }
 #endif
-NK_LIB int
+NK_API int
 nk_text_clamp(const struct nk_user_font *font, const char *text,
     int text_len, float space, int *glyphs, float *text_width,
     nk_rune *sep_list, int sep_count)

@@ -3503,6 +3503,12 @@ NK_API struct nk_vec2 nk_rect_pos(struct nk_rect);
 NK_API struct nk_vec2 nk_rect_size(struct nk_rect);
 /* =============================================================================
  *
+ *                                  UTIL
+ *
+ * ============================================================================= */
+NK_API int nk_text_clamp(const struct nk_user_font *font, const char *text, int text_len, float space, int *glyphs, float *text_width, nk_rune *sep_list, int sep_count);
+/* =============================================================================
+ *
  *                                  STRING
  *
  * ============================================================================= */

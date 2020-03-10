@@ -1008,7 +1008,7 @@ nk_file_load(const char* path, nk_size* siz, struct nk_allocator *alloc)
     return buf;
 }
 #endif
-NK_LIB int
+NK_API int
 nk_text_clamp(const struct nk_user_font *font, const char *text,
     int text_len, float space, int *glyphs, float *text_width,
     nk_rune *sep_list, int sep_count)
