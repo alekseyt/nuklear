@@ -1030,6 +1030,13 @@ nk_text_clamp(const struct nk_user_font *font, const char *text,
     glyph_len = nk_utf_decode(text, &unicode, text_len);
     while (glyph_len && (width < space) && (len < text_len)) {
         len += glyph_len;
+        /* multi-line text */
+        if (unicode == '\n' || unicode == '\r') {
+            sep_width = last_width = width;
+            sep_g = g+1;
+            sep_len = len;
+            break;
+        }
         s = font->width(font->userdata, font->height, text, len);
         for (i = 0; i < sep_count; ++i) {
             if (unicode != sep_list[i]) continue;

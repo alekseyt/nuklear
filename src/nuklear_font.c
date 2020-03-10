@@ -3164,10 +3164,12 @@ nk_font_text_width(nk_handle handle, float height, const char *text, int len)
     while (text_len <= (int)len && glyph_len) {
         const struct nk_font_glyph *g;
         if (unicode == NK_UTF_INVALID) break;
-
-        /* query currently drawn glyph information */
-        g = nk_font_find_glyph(font, unicode);
-        text_width += g->xadvance * scale;
+        /* multi-line text */
+        if (unicode != '\n' && unicode != '\r') {
+            /* query currently drawn glyph information */
+            g = nk_font_find_glyph(font, unicode);
+            text_width += g->xadvance * scale;
+        }
 
         /* offset next glyph */
         glyph_len = nk_utf_decode(text + text_len, &unicode, (int)len - text_len);

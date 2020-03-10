@@ -1154,23 +1154,26 @@ nk_draw_list_add_text(struct nk_draw_list *list, const struct nk_user_font *font
         float gx, gy, gh, gw;
         float char_width = 0;
         if (unicode == NK_UTF_INVALID) break;
+        /* multi-line text */
+        if (unicode != '\n' && unicode != '\r') {
+            /* query currently drawn glyph information */
+            next_glyph_len = nk_utf_decode(text + text_len + glyph_len, &next, (int)len - text_len);
+            font->query(font->userdata, font_height, &g, unicode,
+                        (next == NK_UTF_INVALID) ? '\0' : next);
 
-        /* query currently drawn glyph information */
-        next_glyph_len = nk_utf_decode(text + text_len + glyph_len, &next, (int)len - text_len);
-        font->query(font->userdata, font_height, &g, unicode,
-                    (next == NK_UTF_INVALID) ? '\0' : next);
+            /* calculate and draw glyph drawing rectangle and image */
+            gx = x + g.offset.x;
+            gy = rect.y + g.offset.y;
+            gw = g.width; gh = g.height;
+            char_width = g.xadvance;
+            nk_draw_list_push_rect_uv(list, nk_vec2(gx,gy), nk_vec2(gx + gw, gy+ gh),
+                g.uv[0], g.uv[1], fg);
 
-        /* calculate and draw glyph drawing rectangle and image */
-        gx = x + g.offset.x;
-        gy = rect.y + g.offset.y;
-        gw = g.width; gh = g.height;
-        char_width = g.xadvance;
-        nk_draw_list_push_rect_uv(list, nk_vec2(gx,gy), nk_vec2(gx + gw, gy+ gh),
-            g.uv[0], g.uv[1], fg);
+            x += char_width;
+        }
 
         /* offset next glyph */
         text_len += glyph_len;
-        x += char_width;
         glyph_len = next_glyph_len;
         unicode = next;
     }
